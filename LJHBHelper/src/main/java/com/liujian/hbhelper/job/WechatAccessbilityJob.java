@@ -10,9 +10,14 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioTrack;
+import android.media.SoundPool;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -20,43 +25,55 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import com.liujian.hbhelper.BuildConfig;
 import com.liujian.hbhelper.Config;
 import com.liujian.hbhelper.QiangHongBaoService;
+import com.liujian.hbhelper.R;
 
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public class WechatAccessbilityJob extends BaseAccessbilityJob {
 
+    public static boolean isScreenOff = false;
+
     private static final String TAG = "WechatAccessbilityJob";
 
-    /**
-     * 微信的包名
-     */
+    // 微信的包名
     private static final String WECHAT_PACKAGENAME = "com.tencent.mm";
 
-    /**
-     * 红包消息的关键字
-     */
+    // 红包消息的关键字
     private static final String HONGBAO_TEXT_KEY = "[微信红包]";
 
-    /**
-     * 不能再使用文字匹配的最小版本号
-     */
-    private static final int USE_ID_MIN_VERSION = 700;// 6.3.8 对应code为680,6.3.9对应code为700
+    // 不能再使用文字匹配的最小版本号
+    private static final int USE_ID_MIN_VERSION = 700; // 6.3.8 对应code为680,6.3.9对应code为700
 
-    private boolean isFirstChecked;
     private boolean isSelf;
+    private boolean isNotifi;
 
     private PackageInfo mWechatPackageInfo = null;
     private Handler mHandler = null;
 
+    public static LinkedList<AccessibilityEvent> scrollQueue = new LinkedList<>();
+    public static LinkedList<AccessibilityEvent> notifiQueue = new LinkedList<>();
+
     private int lastCount = 0;
+    private int scrollCount = 0;
+    private int lastAction;
 
-    public static LinkedBlockingQueue<AccessibilityEvent> queue = new LinkedBlockingQueue<>();
+//    private String lastActionClass;
 
-    private Integer count = 0;
+    private Boolean isHBOpening = false;
 
-    private Integer lock = 0;
+    private boolean hasBack = false;
+
+    private MyHBThread myHBThread;
+
+    private SoundPool soundPool;
+    private byte[] tempbytes;
+    private AudioTrack trackplayer;
+    private int bufsize;
+    private int sourceIdGeneral;
 
     private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
         @Override
@@ -69,9 +86,9 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
     @Override
     public void onCreateJob(QiangHongBaoService service) {
         super.onCreateJob(service);
-
+        myHBThread = new MyHBThread();
+        myHBThread.start();
         updatePackageInfo();
-
         IntentFilter filter = new IntentFilter();
         filter.addDataScheme("package");
         filter.addAction("android.intent.action.PACKAGE_ADDED");
@@ -79,6 +96,25 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
         filter.addAction("android.intent.action.PACKAGE_REMOVED");
 
         getContext().registerReceiver(broadcastReceiver, filter);
+
+        if (getConfig().isEnableSound()) {
+            bufsize = AudioTrack.getMinBufferSize(8000, AudioFormat.CHANNEL_CONFIGURATION_STEREO, AudioFormat.ENCODING_PCM_16BIT);
+            trackplayer = new AudioTrack(AudioManager.STREAM_MUSIC,
+                    8000,
+                    AudioFormat.CHANNEL_CONFIGURATION_STEREO,
+                    AudioFormat.ENCODING_PCM_16BIT, bufsize,
+                    AudioTrack.MODE_STREAM);
+            tempbytes = new byte[4096];
+
+            soundPool = new SoundPool(1, AudioManager.STREAM_MUSIC, 0);
+            sourceIdGeneral = soundPool.load(getService(), R.raw.diaoluo_da, 0);
+        }
+    }
+
+    public void playSound() {
+        if(getConfig().isEnableSound()) {
+            soundPool.play(sourceIdGeneral, 1, 1, 0, 0, 1);
+        }
     }
 
     @Override
@@ -102,65 +138,143 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
     @Override
     public synchronized void onReceiveJob(AccessibilityEvent event) {
         final int eventType = event.getEventType();
-        //通知栏事件
-        if (eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
-            List<CharSequence> texts = event.getText();
-            if (!texts.isEmpty()) {
-                for (CharSequence t : texts) {
-                    String text = String.valueOf(t);
-                    if (text.equals("已发送")) {
-                        count++;
-                        isSelf = true;
-                        isFirstChecked = true;
-                    }
-                    if (text.contains(HONGBAO_TEXT_KEY)) {
-                        addToHongBaoEvent(event);
-                        count++;
-                        break;
-                    }
+        boolean isHbEvent = isHBEvent(event);
+
+        if (isHbEvent && isScreenOff) {
+            PowerManager pm = (PowerManager)getService().getSystemService(Context.POWER_SERVICE);
+            final PowerManager.WakeLock mWakelock = pm.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP|PowerManager.SCREEN_DIM_WAKE_LOCK, "SimpleTimer");
+            mWakelock.acquire();
+            getHandler().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    mWakelock.release();
                 }
+            }, 3000);
+        }
+        if (isHbEvent) {
+            playSound();
+        }
+
+        if (!myHBThread.isAlive()) {
+            myHBThread = new MyHBThread();
+            myHBThread.start();
+        }
+
+        Log.d("LJTAG", "isHbOpening " + isHBOpening + " isHBEvent " + isHbEvent + "  " + event);
+        if (isHbEvent && eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            if (lastAction == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED){
+                isHBOpening = false;
+                isNotifi = false;
+            }
+            if (isHBOpening) {   // 正在打开红包 当前红包入队列
+                scrollQueue.push(event);
+            } else {             // 直接打开红包
+                openScrolledHongBao(event);
+            }
+        } else if (isHbEvent && eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
+            if (isHBOpening) {
+                notifiQueue.push(event);
+            } else {
+                lastCount = 0;
+                isHBOpening = true;
+                openNotify(event);
             }
         } else if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             openHongBao(event);
-        } else if (eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-            checkIsHongBaoScrolled(event);
         }
+//        else if (lastAction == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && "com.tencent.mm.plugin.luckymoney.ui.LuckyMoneyDetailUI".equals(lastActionClass)
+//                && eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED && event.getItemCount() == 2) {
+//            hasBack = true;
+//            getHandler().postDelayed(new Runnable() {
+//                @Override
+//                public void run() {
+//                    getService().performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+//                    hasBack = false;
+//                }
+//            }, 500);
+//        }
+        lastAction = eventType;
+//        lastActionClass = event.getClassName().toString();
     }
 
-    private void addToHongBaoEvent(AccessibilityEvent event) {
-        try {
-            queue.put(event);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void getHongBao() {
-        while (true) {
-            try {
-                if (lock == 0) {
-                    lock = 1;
-                    AccessibilityEvent event = queue.take();
-                    doJob(event);
-                } else {
-                    Thread.sleep(10);
+    public boolean isHBEvent(AccessibilityEvent event) {
+        boolean isHbEvent = false;
+        switch (event.getEventType()) {
+            case AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED: {
+                List<CharSequence> texts = event.getText();
+                if (!texts.isEmpty()) {
+                    for (CharSequence t : texts) {
+                        String text = String.valueOf(t);
+                        if (text.equals("已发送")) {
+                            isSelf = true;
+                            openHongBao(event);
+                        }
+                        if (text.contains(HONGBAO_TEXT_KEY)) {
+                            isHbEvent = true;
+                            break;
+                        }
+                    }
                 }
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+                break;
+            }
+            case AccessibilityEvent.TYPE_VIEW_SCROLLED: {
+                AccessibilityNodeInfo nodeInfo = event.getSource();
+                int tmpCount = event.getItemCount();
+                if (nodeInfo != null && tmpCount != lastCount && "android.widget.ListView".equals(nodeInfo.getClassName())) {
+                    AccessibilityNodeInfo possibleNode = nodeInfo.getChild(nodeInfo.getChildCount() - 1);
+                    List<AccessibilityNodeInfo> list = possibleNode.findAccessibilityNodeInfosByText("领取红包");
+                    AccessibilityNodeInfo tmpNode = null;
+                    for (int i = 0; i < list.size(); i++) {
+                        tmpNode = list.get(i);
+                        if (tmpNode.getParent() != null && tmpNode.getParent().getChildCount() == 1) {
+                            list.remove(i);
+                            i--;
+                        }
+                    }
+                    isHbEvent = !list.isEmpty();
+                }
+                break;
+            }
+        }
+        return isHbEvent;
+    }
+
+    private void openScrolledHongBao(AccessibilityEvent event) {
+        AccessibilityNodeInfo nodeInfo = event.getSource();
+        int tmpCount = event.getItemCount();
+        Log.d("LJTAG", "OpenScroll : " + event);
+        if (nodeInfo != null && tmpCount != lastCount && "android.widget.ListView".equals(nodeInfo.getClassName())) {
+            lastCount = tmpCount;
+            AccessibilityNodeInfo possibleNode = nodeInfo.getChild(nodeInfo.getChildCount() - 1);
+            List<AccessibilityNodeInfo> list = possibleNode.findAccessibilityNodeInfosByText("领取红包");
+            AccessibilityNodeInfo tmpNode = null;
+            for (int i = 0; i < list.size(); i++) {
+                tmpNode = list.get(i);
+                if (tmpNode.getParent() != null && tmpNode.getParent().getChildCount() == 1) {
+                    list.remove(i);
+                    i--;
+                }
+            }
+            if (!list.isEmpty()) {
+                AccessibilityNodeInfo targetNode = list.get(0);
+                if (targetNode != null) {
+                    isHBOpening = true;
+                    final AccessibilityNodeInfo n = targetNode.getParent();
+                    long sDelayTime = getConfig().getWechatClickDelayTime();
+                    if (sDelayTime != 0) {
+                        getHandler().postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                            }
+                        }, sDelayTime);
+                    } else {
+                        n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    }
+                }
             }
         }
     }
-
-    private void doJob(AccessibilityEvent event) {
-        if (event.getAction() == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
-            openNotify(event);
-        } else if (event.getAction() == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-
-        } else if (event.getAction() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED){
-
-        }
-    }
-
 
     /**
      * 打开通知栏消息
@@ -174,8 +288,7 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
         //以下是精华，将微信的通知栏消息打开
         Notification notification = (Notification) event.getParcelableData();
         PendingIntent pendingIntent = notification.contentIntent;
-
-        isFirstChecked = true;
+        isNotifi = true;
         try {
             pendingIntent.send();
         } catch (Exception e) {
@@ -186,64 +299,74 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
     private void openHongBao(AccessibilityEvent event) {
         if ("com.tencent.mm.plugin.luckymoney.ui.LuckyMoneyReceiveUI".equals(event.getClassName())) {
-            //点中了红包，下一步就是去拆红包
             handleLuckyMoneyReceive(event);
-        } else if ("com.tencent.mm.plugin.luckymoney.ui.LuckyMoneyDetailUI".equals(event.getClassName())) {
-            //拆完红包后看详细的纪录界面
-            long bDelayTime = getConfig().getWechatBackDelayTime();
+            long bDelayTime = getConfig().getWechatBackDelayTime() + 1000;
+            hasBack = true;
             getHandler().postDelayed(new Runnable() {
                 @Override
                 public void run() {
                     getService().performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+                    hasBack = false;
                     Log.d("LJTAG", "Back Press");
                 }
             }, bDelayTime);
+        } else if ("com.tencent.mm.plugin.luckymoney.ui.LuckyMoneyDetailUI".equals(event.getClassName())) {
+            if (!hasBack) {
+                hasBack = true;
+                getHandler().postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        getService().performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+                        hasBack = false;
+                        Log.d("LJTAG", "Back Press");
+                    }
+                }, 500);
+            }
+            isHBOpening = false;
         } else if ("com.tencent.mm.ui.LauncherUI".equals(event.getClassName())) {
-            //在聊天界面,去点中红包
             handleChatListHongBao();
         }
     }
 
-    @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
-    private void checkIsHongBaoScrolled(AccessibilityEvent event) {
-        int tmpCount = event.getItemCount();
-        AccessibilityNodeInfo nodeInfo = event.getSource();
-        if (nodeInfo != null && tmpCount != lastCount && "android.widget.ListView".equals(nodeInfo.getClassName())) {
-            lastCount = tmpCount;
-            AccessibilityNodeInfo possibleNode = nodeInfo.getChild(nodeInfo.getChildCount() - 1);
-            List<AccessibilityNodeInfo> list = possibleNode.findAccessibilityNodeInfosByText("领取红包");
-
-            AccessibilityNodeInfo targetNode = null, tmpNode = null;
-
-            //TODO 优化过滤
-            for (int i = 0; i < list.size(); i++) {
-                tmpNode = list.get(i);
-                if (tmpNode.getParent() != null && tmpNode.getParent().getChildCount() == 1) {
-                    list.remove(i);
-                    i--;
-                }
-            }
-
-            if (!list.isEmpty()) {
-                targetNode = list.get(list.size() - 1);
-            }
-            if (targetNode != null) {
-                count++;
-                final AccessibilityNodeInfo n = targetNode.getParent();
-                long sDelayTime = getConfig().getWechatOpenDelayTime();
-                if (sDelayTime != 0) {
-                    getHandler().postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                        }
-                    }, sDelayTime);
-                } else {
-                    n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                }
-            }
-        }
-    }
+//    @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
+//    private void checkIsHongBaoScrolled(AccessibilityEvent event) {
+//        int tmpCount = event.getItemCount();
+//        AccessibilityNodeInfo nodeInfo = event.getSource();
+//        if (nodeInfo != null && tmpCount != lastCount && "android.widget.ListView".equals(nodeInfo.getClassName())) {
+//            lastCount = tmpCount;
+//            AccessibilityNodeInfo possibleNode = nodeInfo.getChild(nodeInfo.getChildCount() - 1);
+//            List<AccessibilityNodeInfo> list = possibleNode.findAccessibilityNodeInfosByText("领取红包");
+//
+//            AccessibilityNodeInfo targetNode = null, tmpNode = null;
+//
+//            //TODO 优化过滤
+//            for (int i = 0; i < list.size(); i++) {
+//                tmpNode = list.get(i);
+//                if (tmpNode.getParent() != null && tmpNode.getParent().getChildCount() == 1) {
+//                    list.remove(i);
+//                    i--;
+//                }
+//            }
+//
+//            if (!list.isEmpty()) {
+//                targetNode = list.get(list.size() - 1);
+//            }
+//            if (targetNode != null) {
+//                final AccessibilityNodeInfo n = targetNode.getParent();
+//                long sDelayTime = getConfig().getWechatOpenDelayTime();
+//                if (sDelayTime != 0) {
+//                    getHandler().postDelayed(new Runnable() {
+//                        @Override
+//                        public void run() {
+//                            n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+//                        }
+//                    }, sDelayTime);
+//                } else {
+//                    n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+//                }
+//            }
+//        }
+//    }
 
     /**
      * 点击聊天里的红包后，显示的界面
@@ -310,6 +433,31 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
         }
     }
 
+    class MyHBThread extends Thread {
+        @Override
+        public void run() {
+            while (true) {
+                if (isHBOpening) {
+                    try {
+                        sleep(15);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    if (!scrollQueue.isEmpty()) {
+                        scrollCount = scrollQueue.size() + 1;
+                        scrollQueue.pop();
+                        handleChatListHongBao();
+                        continue;
+                    }
+                    if (!notifiQueue.isEmpty()) {
+                        onReceiveJob(notifiQueue.pop());
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * 收到聊天里的红包
      */
@@ -327,7 +475,6 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
         } else {
             list = nodeInfo.findAccessibilityNodeInfosByText("领取红包");
         }
-        isSelf = false;
 
         if (list != null && list.isEmpty()) {
             // 从消息列表查找红包
@@ -345,29 +492,46 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
                 break;
             }
         } else if (list != null) {
-            //最新的红包领起
-            if (count >= list.size()) {
-                count = list.size() - 1;
+            if (isSelf) {
+                scrollCount = 1;
+                isSelf = false;
             }
-            Log.d("LJTAG", "ListSize " + list.size() + "  Count: " + count);
-            for (int i = list.size() - count; i < list.size(); i++) {
-//                for (int i = list.size() - count - 1; i >= 0; i--) {
+            if (isNotifi) {
+                scrollCount = 1;
+                isNotifi = false;
+            }
+            if (scrollCount > list.size()) {
+                scrollCount = list.size();
+            }
+
+            Log.d("LJTAG", "ListSize " + list.size() + "  Count: " + scrollCount);
+            for (int i = list.size() - scrollCount; i < list.size(); i++) {
                 AccessibilityNodeInfo parent = list.get(i).getParent();
                 if (parent != null) {
-                    if (isFirstChecked) {
-                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                        if (count == 0)
-                            isFirstChecked = false;
-                        count--;
-                        if (count < 0)
-                            count = 0;
-                        if (BuildConfig.DEBUG) {
-                            Log.i(TAG, "-->领取红包:" + parent);
-                        }
+
+                    final AccessibilityNodeInfo n = parent;
+                    long sDelayTime = getConfig().getWechatClickDelayTime();
+                    if (sDelayTime != 0) {
+                        getHandler().postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                            }
+                        }, sDelayTime);
+                    } else {
+                        n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                     }
+
+                    if (BuildConfig.DEBUG) {
+                        Log.i(TAG, "-->领取红包:" + parent);
+                    }
+                    scrollCount = 0;
+                    isHBOpening = true;
                     break;
                 }
             }
+        } else {
+            isHBOpening = false;
         }
     }
 
@@ -378,9 +542,7 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
         return mHandler;
     }
 
-    /**
-     * 获取微信的版本
-     */
+    // 获取微信的版本
     private int getWechatVersion() {
         if (mWechatPackageInfo == null) {
             return 0;
@@ -388,9 +550,7 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
         return mWechatPackageInfo.versionCode;
     }
 
-    /**
-     * 更新微信包信息
-     */
+    // 更新微信包信息
     private void updatePackageInfo() {
         try {
             mWechatPackageInfo = getContext().getPackageManager().getPackageInfo(WECHAT_PACKAGENAME, 0);

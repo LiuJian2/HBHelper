@@ -5,6 +5,7 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 import android.annotation.TargetApi;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
@@ -31,12 +32,20 @@ public class QiangHongBaoService extends AccessibilityService {
     private Config mConfig;
     private List<AccessbilityJob> mAccessbilityJobs;
 
+    private ScreenListener screenListener;
+
     @Override
     public void onCreate() {
         super.onCreate();
 
         mAccessbilityJobs = new ArrayList<>();
         mConfig = new Config(this);
+
+        screenListener = new ScreenListener();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(screenListener, filter);
 
         for (Class clazz : ACCESSBILITY_JOBS) {
             try {

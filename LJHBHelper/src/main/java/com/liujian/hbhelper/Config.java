@@ -10,6 +10,7 @@ public class Config {
 
     public static final String PREFERENCE_NAME = "config";
     public static final String KEY_ENABLE_WECHAT = "KEY_ENABLE_WECHAT";
+    public static final String KEY_ENABLE_WECHAT_SOUND = "KEY_ENABLE_WECHAT_SOUND";
     public static final String KEY_WECHAT_AFTER_OPEN_HONGBAO = "KEY_WECHAT_AFTER_OPEN_HONGBAO";
 
     public static final String KEY_WECHAT_OPEN_DELAY_TIME = "KEY_WECHAT_OPEN_DELAY_TIME";
@@ -30,6 +31,10 @@ public class Config {
      */
     public boolean isEnableWechat() {
         return preferences.getBoolean(KEY_ENABLE_WECHAT, true);
+    }
+
+    public boolean isEnableSound() {
+        return preferences.getBoolean(KEY_ENABLE_WECHAT_SOUND, false);
     }
 
     /**

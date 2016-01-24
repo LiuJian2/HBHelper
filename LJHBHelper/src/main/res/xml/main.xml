@@ -7,13 +7,18 @@
             android:key="KEY_ENABLE_WECHAT"
             android:title="开启XXX" />
 
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="KEY_ENABLE_WECHAT_SOUND"
+            android:title="开启音效" />
+
         <EditTextPreference
             android:defaultValue="0"
             android:dialogTitle="设置延迟时间(毫秒)"
             android:hint="单位毫秒(1秒=1000毫秒)"
             android:inputType="number"
             android:key="KEY_WECHAT_OPEN_DELAY_TIME"
-            android:title="设置拆XX延时" />
+            android:title="设置拆延时" />
 
         <EditTextPreference
             android:defaultValue="0"
@@ -21,7 +26,7 @@
             android:hint="单位毫秒(1秒=1000毫秒)"
             android:inputType="number"
             android:key="KEY_WECHAT_CLICK_DELAY_TIME"
-            android:title="设置点击XX延时" />
+            android:title="设置点击延时" />
 
         <EditTextPreference
             android:defaultValue="0"
