@@ -242,7 +242,6 @@ public class WechatAccessbilityJob extends BaseAccessbilityJob {
     private void openScrolledHongBao(AccessibilityEvent event) {
         AccessibilityNodeInfo nodeInfo = event.getSource();
         int tmpCount = event.getItemCount();
-        Log.d("LJTAG", "OpenScroll : " + event);
         if (nodeInfo != null && tmpCount != lastCount && "android.widget.ListView".equals(nodeInfo.getClassName())) {
             lastCount = tmpCount;
             AccessibilityNodeInfo possibleNode = nodeInfo.getChild(nodeInfo.getChildCount() - 1);
